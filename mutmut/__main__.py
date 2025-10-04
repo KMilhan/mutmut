@@ -4,7 +4,8 @@ import gc
 import inspect
 import itertools
 import json
-from multiprocessing import Pool, set_start_method, Lock
+import pickle
+from multiprocessing import Lock, get_all_start_methods, get_context
 import os
 import resource
 import shutil
@@ -61,6 +62,11 @@ import mutmut
 from mutmut.code_coverage import gather_coverage, get_covered_lines_for_file
 from mutmut.file_mutation import mutate_file_contents
 from mutmut.trampoline_templates import CLASS_NAME_SEPARATOR
+
+if __name__ == '__main__':
+    import sys
+    sys.modules['mutmut.__main__'] = sys.modules[__name__]
+
 
 # Document: surviving mutants are retested when you ask mutmut to retest them, interactively in the UI or via command line
 
@@ -204,8 +210,52 @@ class FileMutationResult:
     warnings: list[Warning]
     error: Optional[Exception] = None
 
+FileMutationResult.__module__ = 'mutmut.__main__'
+
 def create_mutants(max_children: int):
-    with Pool(processes=max_children) as p:
+    worker_config = mutmut.config
+    worker_covered_lines = mutmut._covered_lines
+
+    mutmut.config = worker_config
+    mutmut._covered_lines = worker_covered_lines
+
+    if worker_config is None:
+        raise RuntimeError('Configuration must be loaded before creating mutants.')
+
+    ctx = get_context()
+
+    initializer = _initialize_worker_state
+    if initializer.__module__ == '__main__':
+        from importlib import import_module
+
+        initializer = import_module('mutmut.__main__')._initialize_worker_state
+
+    pool_kwargs = dict(processes=max_children, initializer=initializer)
+
+    start_method = ctx.get_start_method()
+    available_methods = get_all_start_methods()
+
+    if start_method == 'forkserver' and 'fork' in available_methods:
+        ctx = get_context('fork')
+        pool_kwargs['initargs'] = ()
+    elif start_method == 'spawn':
+        pool_kwargs['initargs'] = (worker_config, worker_covered_lines)
+    else:
+        try:
+            pickle.dumps((worker_config, worker_covered_lines))
+        except Exception:
+            if 'fork' in available_methods:
+                ctx = get_context('fork')
+                pool_kwargs['initargs'] = ()
+            else:
+                raise RuntimeError(
+                    'mutmut configuration is not serializable for multiprocessing. '
+                    'Consider avoiding dynamic callables in configuration on this platform.'
+                )
+        else:
+            pool_kwargs['initargs'] = (worker_config, worker_covered_lines)
+
+    with ctx.Pool(**pool_kwargs) as p:
         for result in p.imap_unordered(create_file_mutants, walk_source_files()):
             for warning in result.warnings:
                 warnings.warn(warning)
@@ -242,7 +292,13 @@ def setup_source_paths():
 
 def store_lines_covered_by_tests():
     if mutmut.config.mutate_only_covered_lines:
-        mutmut._covered_lines = gather_coverage(PytestRunner(), list(walk_source_files()))
+        coverage_by_file = gather_coverage(PytestRunner(), list(walk_source_files()))
+        mutmut._covered_lines = {
+            filename: set(lines)
+            for filename, lines in coverage_by_file.items()
+        }
+    else:
+        mutmut._covered_lines = None
 
 def copy_also_copy_files():
     assert isinstance(mutmut.config.also_copy, list)
@@ -722,6 +778,21 @@ class Config:
                 return True
         return False
 
+Config.__module__ = 'mutmut.__main__'
+
+
+_UNSET = object()
+
+
+def _initialize_worker_state(
+    config: Config = _UNSET,
+    covered_lines: Optional[dict[str, set[int]]] = _UNSET,
+):
+    if config is not _UNSET:
+        mutmut.config = config
+    if covered_lines is not _UNSET:
+        mutmut._covered_lines = covered_lines
+
 
 def config_reader():
     path = Path('pyproject.toml')
@@ -957,8 +1028,6 @@ def stop_all_children(mutants):
     for m, _, _ in mutants:
         m.stop_children()
 
-# used to copy the global mutmut.config to subprocesses
-set_start_method('fork')
 START_TIMES_BY_PID_LOCK = Lock()
 
 def timeout_checker(mutants):

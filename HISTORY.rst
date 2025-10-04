@@ -1,6 +1,14 @@
 Changelog
 ---------
 
+Unreleased
+~~~~~~~~~~
+
+* Support Python 3.14 by sharing configuration and coverage data with multiprocessing
+  workers instead of relying on ``fork`` semantics.
+* Pin ``libcst`` to ``~=1.8.0`` so Python 3.14 parsing remains stable without
+  regressing earlier supported interpreters.
+
 3.3.1
 ~~~~~
 
