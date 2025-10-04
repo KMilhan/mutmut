@@ -30,6 +30,44 @@ def mutated_module(source: str) -> str:
     return mutated_code
 
 
+def _function_container_names(mutations: list["Mutation"]):
+    for mutation in mutations:
+        container = mutation.contained_by_top_level_function
+        if container is None:
+            yield None
+        else:
+            yield container.name.value
+
+
+def test_mutations_retain_enclosing_function_metadata():
+    source = """
+GLOBAL = 5
+
+
+def top() -> int:
+    return 1 + 2
+
+
+class Greeter:
+    def greet(self) -> int:
+        return 3 + 4
+"""
+
+    _, mutations = create_mutations(source)
+
+    container_names = list(_function_container_names(mutations))
+
+    assert None in container_names, "Top-level mutations should not have a function container."  # noqa: ERA001
+
+    binary_mutations = [
+        mutation
+        for mutation in mutations
+        if isinstance(mutation.original_node, cst.BinaryOperation)
+    ]
+
+    assert {mutation.contained_by_top_level_function.name.value for mutation in binary_mutations} == {"top", "greet"}
+
+
 @pytest.mark.parametrize(
     'original, expected', [
         ('foo(a, *args, **kwargs)', [

@@ -49,7 +49,7 @@ def gather_coverage(runner, source_files):
             raise Exception(f'Could not collect coverage for file {abs_filename}. '
                              'Please create a MRE and file an issue.'
                             f'Collected coverage from following files: {coverage_data.measured_files()}')
-        covered_lines[abs_filename] = list(lines)
+        covered_lines[abs_filename] = set(lines)
 
     _unload_modules_not_in(modules)
 
